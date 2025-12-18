@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Paper Reader v4.0</title>
+    <link href="https://cdn.staticfile.org/twitter-bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .markdown-body { padding: 20px; background-color: #f8f9fa; border-radius: 5px; border: 1px solid #ddd; }
+        .loading-spinner { display: none; }
+        #dashboard-section { display: none; }
+        /* 让模态框内容稍微好看点 */
+        .modal-body img { max-width: 100%; }
+        pre { background: #2d2d2d; color: #ccc; padding: 10px; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-light">
+
+<div class="container mt-5">
+    <div class="row justify-content-center">
+        <div class="col-md-9">
+            
+            <div class="text-center mb-4">
+                <h1 class="text-primary">🧠 Smart Paper Reader</h1>
+                <p class="text-muted">基于 DeepSeek v4.0 的智能论文分析平台 (Redis+MQ极速版)</p>
+            </div>
+
+            <div id="login-section" class="card shadow-sm">
+                <div class="card-body p-4">
+                    <h4 class="card-title mb-3 text-center">系统登录</h4>
+                    <div class="mb-3">
+                        <label class="form-label">用户名</label>
+                        <input type="text" id="username" class="form-control" placeholder="默认: zhouxin" value="zhouxin">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">密码</label>
+                        <input type="password" id="password" class="form-control" placeholder="默认: 123456" value="123456">
+                    </div>
+                    <button class="btn btn-primary w-100" onclick="doLogin()">登 录</button>
+                    <div id="login-msg" class="text-danger mt-2 text-center"></div>
+                </div>
+            </div>
+
+            <div id="dashboard-section">
+                <div class="alert alert-info d-flex justify-content-between align-items-center shadow-sm">
+                    <div>
+                        <span class="fs-5 me-3">👤 用户: <strong id="show-username">--</strong></span>
+                        <span class="fs-5">💰 剩余积分: <strong id="show-points" class="text-danger">--</strong></span>
+                    </div>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="logout()">退出登录</button>
+                </div>
+
+                <div class="card shadow-sm mb-4">
+                    <div class="card-header bg-white fw-bold">📄 上传论文 PDF</div>
+                    <div class="card-body">
+                        <div class="input-group mb-3">
+                            <input type="file" class="form-control" id="fileInput" accept=".pdf">
+                            <button class="btn btn-success px-4" type="button" onclick="uploadFile()">开始分析</button>
+                        </div>
+                        <small class="text-muted">
+                            <i class="bi bi-info-circle"></i> 规则：VIP 用户免费，普通用户每次扣除 1 积分 (基于 Redis 原子扣费，防止并发超卖)
+                        </small>
+                    </div>
+                </div>
+
+                <div class="card shadow-sm">
+                    <div class="card-header bg-white d-flex justify-content-between align-items-center">
+                        <span class="fw-bold">📋 历史任务 (本地记录)</span>
+                        <button class="btn btn-sm btn-primary" onclick="refreshList()">刷新列表</button>
+                    </div>
+                    <div class="card-body p-0">
+                        <table class="table table-hover mb-0 align-middle">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>任务ID</th>
+                                    <th>文件名</th>
+                                    <th>状态</th>
+                                    <th class="text-end">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="task-list-body">
+                                </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<div class="modal fade" id="reportModal" tabindex="-1">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header bg-light">
+                <h5 class="modal-title">📄 深度分析报告</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div id="markdown-content" class="markdown-body">
+                    </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.staticfile.org/axios/1.3.6/axios.min.js"></script>
+<script src="https://cdn.staticfile.org/twitter-bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdn.staticfile.org/marked/4.3.0/marked.min.js"></script>
+
+<script>
+    // 配置后端地址
+    const API_BASE = 'http://localhost:8080';
+    
+    const TOKEN_KEY = 'paper_token';
+    const TASKS_KEY = 'paper_tasks'; 
+
+    // 初始化
+    window.onload = function() {
+        const token = localStorage.getItem(TOKEN_KEY);
+        if (token) {
+            showDashboard();
+        }
+    };
+
+    // --- 1. 登录 ---
+    function doLogin() {
+        const u = document.getElementById('username').value;
+        const p = document.getElementById('password').value;
+        const msgDiv = document.getElementById('login-msg');
+        msgDiv.innerText = "";
+        
+        // 增加一点交互反馈
+        const btn = document.querySelector('button[onclick="doLogin()"]');
+        const originalText = btn.innerText;
+        btn.innerText = "登录中...";
+        btn.disabled = true;
+        
+        axios.post(`${API_BASE}/login`, { username: u, password: p })
+            .then(res => {
+                const data = res.data;
+                if (data.code === 200) {
+                    localStorage.setItem(TOKEN_KEY, data.token);
+                    localStorage.setItem('username', data.username);
+                    localStorage.setItem('points', data.points);
+                    showDashboard();
+                } else {
+                    msgDiv.innerText = data.msg;
+                }
+            })
+            .catch(err => {
+                console.error(err);
+                if (err.code === "ERR_NETWORK") {
+                    msgDiv.innerText = "无法连接后端，请检查后端是否启动 (F12看控制台)";
+                } else if (typeof axios === 'undefined') {
+                    msgDiv.innerText = "Axios 加载失败，请检查网络";
+                } else {
+                    msgDiv.innerText = "登录异常: " + err.message;
+                }
+            })
+            .finally(() => {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            });
+    }
+
+    function logout() {
+        localStorage.removeItem(TOKEN_KEY);
+        location.reload();
+    }
+
+    function showDashboard() {
+        document.getElementById('login-section').style.display = 'none';
+        document.getElementById('dashboard-section').style.display = 'block';
+        document.getElementById('show-username').innerText = localStorage.getItem('username');
+        document.getElementById('show-points').innerText = localStorage.getItem('points');
+        renderTaskList();
+    }
+
+    // --- 2. 上传 (已修复 Network Error 问题) ---
+    function uploadFile() {
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput.files.length === 0) {
+            alert("请选择文件");
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+
+        const token = localStorage.getItem(TOKEN_KEY);
+        const btn = document.querySelector('.btn-success');
+        const originalText = btn.innerText;
+        btn.innerText = "正在上传...";
+        btn.disabled = true;
+
+        axios.post(`${API_BASE}/upload`, formData, {
+            headers: { 
+                'Authorization': 'Bearer ' + token
+            }
+        }).then(res => {
+            const msg = res.data; 
+            alert(msg); 
+
+            const match = msg.match(/任务ID:\s*(\d+)/);
+            if (match) {
+                const taskId = match[1];
+                addTaskToLocal(taskId, fileInput.files[0].name);
+                let pts = parseInt(document.getElementById('show-points').innerText);
+                if (!isNaN(pts)) {
+                    document.getElementById('show-points').innerText = pts - 1;
+                }
+            }
+        }).catch(err => {
+            console.error("上传错误详情:", err);
+            let errMsg = "上传失败";
+            if (err.response) {
+                errMsg += `: ${err.response.data || err.response.statusText}`;
+            } else if (err.code === "ERR_NETWORK") {
+                errMsg += ": 网络错误。请检查后端是否配置了 max-file-size=50MB 以及 CorsConfig。";
+            } else {
+                errMsg += `: ${err.message}`;
+            }
+            alert(errMsg);
+        }).finally(() => {
+            btn.innerText = originalText;
+            btn.disabled = false;
+            fileInput.value = ''; 
+        });
+    }
+
+    // --- 3. 任务列表管理 ---
+    function addTaskToLocal(id, name) {
+        let tasks = JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
+        tasks.unshift({ id: id, name: name });
+        localStorage.setItem(TASKS_KEY, JSON.stringify(tasks));
+        renderTaskList();
+    }
+
+    function renderTaskList() {
+        const tasks = JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
+        const tbody = document.getElementById('task-list-body');
+        tbody.innerHTML = '';
+
+        tasks.forEach(task => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><span class="badge bg-secondary">${task.id}</span></td>
+                <td>${task.name}</td>
+                <td><span class="badge bg-secondary" id="status-${task.id}">未查询</span></td>
+                <td class="text-end">
+                    <button class="btn btn-sm btn-outline-primary" onclick="checkTask('${task.id}')">
+                        查看结果
+                    </button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    function refreshList() {
+        renderTaskList();
+    }
+
+    // --- 4. 查询结果 (走 Redis 缓存) ---
+    function checkTask(taskId) {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const statusSpan = document.getElementById(`status-${taskId}`);
+        
+        statusSpan.className = "badge bg-warning text-dark";
+        statusSpan.innerText = "查询中...";
+
+        axios.get(`${API_BASE}/task/${taskId}`, {
+            headers: { 'Authorization': 'Bearer ' + token }
+        }).then(res => {
+            const content = res.data;
+            
+            if (content.length < 100 && (content.includes("处理中") || content.includes("任务"))) {
+                statusSpan.className = "badge bg-info";
+                statusSpan.innerText = "处理中";
+                alert(`任务 ${taskId}: ${content}`);
+            } else {
+                statusSpan.className = "badge bg-success";
+                statusSpan.innerText = "已完成";
+                
+                document.getElementById('markdown-content').innerHTML = marked.parse(content);
+                const modal = new bootstrap.Modal(document.getElementById('reportModal'));
+                modal.show();
+            }
+        }).catch(err => {
+            statusSpan.className = "badge bg-danger";
+            statusSpan.innerText = "出错";
+            console.error(err);
+            alert("查询出错: " + (err.response ? err.response.data : err.message));
+        });
+    }
+</script>
+
+</body>
+</html>
